@@ -38,7 +38,7 @@ class PIDReceiver:
             return None
             
         # 检查帧头和帧尾
-        if data[0:2] != b'\xAA\x55' or data[14:16] != b'\x55\xAA':
+        if data[0:2] != b'\xA5\x5A' or data[14:16] != b'\x5A\xA5':
             return None
             
         # 提取数据
@@ -98,7 +98,7 @@ class PIDReceiver:
                     # 查找完整的数据包
                     while len(buffer) >= 16:
                         # 查找帧头
-                        start_index = buffer.find(b'\xAA\x55')
+                        start_index = buffer.find(b'\xA5\x5A')
                         if start_index == -1:
                             buffer = buffer[-1:]  # 保留最后一个字节
                             break
@@ -117,9 +117,9 @@ class PIDReceiver:
                             if result:
                                 timestamp = time.strftime("%H:%M:%S")
                                 print(f"[{timestamp}] 接收到 {result['type']} PID参数:")
-                                print(f"  P = {result['P']:.6f}")
-                                print(f"  I = {result['I']:.6f}")
-                                print(f"  D = {result['D']:.6f}")
+                                print(f"  P = {result['P']:.5f}")
+                                print(f"  I = {result['I']:.5f}")
+                                print(f"  D = {result['D']:.5f}")
                                 print("-" * 40)
                             else:
                                 print("接收到无效数据包")

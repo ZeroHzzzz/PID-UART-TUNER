@@ -1,4 +1,4 @@
-# PID调参工具使用说明 (增强版 - 支持UV)
+# PID调参工具
 
 ## 安装依赖
 
@@ -67,7 +67,7 @@ python test_receiver.py
 - 范围设置会自动保存到配置文件
 
 ### 🎛️ 增强的滑块控制
-- 高精度滑块，支持小数点后6位精度
+- 高精度滑块，支持小数点后5位精度
 - 精度调节按钮（+/-按钮），可以进行0.001的微调
 - 实时数值显示和输入框同步
 
@@ -136,7 +136,7 @@ python pid_tuner.py
 
 #### 方法2：直接输入数值
 - 在参数输入框中直接输入精确数值
-- 支持小数点后6位精度
+- 支持小数点后5位精度
 
 #### 方法3：精度微调
 - 使用参数旁边的+/-按钮进行0.001的精细调节
@@ -258,6 +258,222 @@ uv add --dev package-name
 - 如果UV命令不工作，检查是否正确安装：`uv --version`
 - 如果依赖安装失败，尝试：`uv sync --reinstall`
 - 查看详细的UV使用指南：[UV_GUIDE.md](UV_GUIDE.md)
+
+## C语言接收端示例代码
+
+如果你需要在单片机或其他C语言环境中接收PID参数，可以参考以下示例代码：
+
+### 数据结构定义
+
+```c
+#include <stdint.h>
+#include <string.h>
+
+// PID参数数据包结构（16字节）
+typedef struct {
+    uint8_t header[2];    // 帧头 0xA5 0x5A
+    uint8_t type;         // 参数类型：0x01=角速度环, 0x02=角度环, 0x03=速度环
+    float p;              // P参数（IEEE754单精度浮点数，小端序）
+    float i;              // I参数
+    float d;              // D参数  
+    uint8_t checksum;     // 校验和
+    uint8_t tail[2];      // 帧尾 0x5A 0xA5
+} __attribute__((packed)) PIDPacket;
+
+// PID参数存储结构
+typedef struct {
+    float p, i, d;
+} PIDParams;
+
+// 系统PID参数
+PIDParams angular_velocity_pid = {0, 0, 0};  // 角速度环
+PIDParams angle_pid = {0, 0, 0};             // 角度环  
+PIDParams velocity_pid = {0, 0, 0};          // 速度环
+```
+
+### 数据包解析函数
+
+```c
+/**
+ * 解析PID参数数据包
+ * @param buffer: 接收到的数据缓冲区
+ * @param len: 数据长度
+ * @return: 1=成功解析, 0=无有效数据包
+ */
+int parse_pid_packet(uint8_t* buffer, int len) {
+    // 查找完整的数据包（16字节）
+    for (int i = 0; i <= len - 16; i++) {
+        // 查找帧头 0xA5 0x5A
+        if (buffer[i] == 0xA5 && buffer[i+1] == 0x5A) {
+            PIDPacket* packet = (PIDPacket*)(buffer + i);
+            
+            // 验证帧尾 0x5A 0xA5
+            if (packet->tail[0] == 0x5A && packet->tail[1] == 0xA5) {
+                
+                // 计算校验和
+                uint8_t calculated_checksum = 0;
+                for (int j = 2; j < 15; j++) {  // 从类型字节到D参数结束
+                    calculated_checksum += buffer[i + j];
+                }
+                
+                // 验证校验和
+                if (calculated_checksum == packet->checksum) {
+                    // 应用PID参数
+                    apply_pid_params(packet->type, packet->p, packet->i, packet->d);
+                    return 1;  // 成功解析
+                }
+            }
+        }
+    }
+    return 0;  // 未找到有效数据包
+}
+
+/**
+ * 应用接收到的PID参数
+ * @param type: 参数类型
+ * @param p, i, d: PID参数值
+ */
+void apply_pid_params(uint8_t type, float p, float i, float d) {
+    switch (type) {
+        case 0x01:  // 角速度环
+            angular_velocity_pid.p = p;
+            angular_velocity_pid.i = i;
+            angular_velocity_pid.d = d;
+            printf("更新角速度环PID: P=%.5f, I=%.5f, D=%.5f\n", p, i, d);
+            break;
+            
+        case 0x02:  // 角度环
+            angle_pid.p = p;
+            angle_pid.i = i;
+            angle_pid.d = d;
+            printf("更新角度环PID: P=%.5f, I=%.5f, D=%.5f\n", p, i, d);
+            break;
+            
+        case 0x03:  // 速度环
+            velocity_pid.p = p;
+            velocity_pid.i = i;
+            velocity_pid.d = d;
+            printf("更新速度环PID: P=%.5f, I=%.5f, D=%.5f\n", p, i, d);
+            break;
+            
+        default:
+            printf("未知参数类型: 0x%02X\n", type);
+            break;
+    }
+}
+```
+
+### 串口接收处理示例
+
+```c
+#define BUFFER_SIZE 256
+
+uint8_t rx_buffer[BUFFER_SIZE];
+int rx_index = 0;
+
+/**
+ * 串口中断接收处理函数
+ * @param data: 接收到的单个字节
+ */
+void uart_rx_handler(uint8_t data) {
+    // 将接收到的数据存入缓冲区
+    rx_buffer[rx_index] = data;
+    rx_index++;
+    
+    // 防止缓冲区溢出
+    if (rx_index >= BUFFER_SIZE) {
+        rx_index = 0;
+    }
+    
+    // 如果缓冲区有足够数据，尝试解析
+    if (rx_index >= 16) {
+        if (parse_pid_packet(rx_buffer, rx_index)) {
+            // 成功解析后，移动缓冲区数据
+            memmove(rx_buffer, rx_buffer + 16, rx_index - 16);
+            rx_index -= 16;
+        }
+    }
+}
+
+/**
+ * 主循环中的处理函数（轮询方式）
+ */
+void process_serial_data(void) {
+    // 如果使用轮询方式接收串口数据
+    while (uart_data_available()) {
+        uint8_t data = uart_read_byte();
+        uart_rx_handler(data);
+    }
+}
+```
+
+### STM32 HAL库示例
+
+```c
+// STM32 HAL库的串口接收中断处理
+void HAL_UART_RxCpltCallback(UART_HandleTypeDef *huart) {
+    if (huart == &huart1) {  // 假设使用UART1
+        uint8_t received_data;
+        
+        // 读取接收到的数据
+        HAL_UART_Receive(&huart1, &received_data, 1, HAL_MAX_DELAY);
+        
+        // 处理接收数据
+        uart_rx_handler(received_data);
+        
+        // 重新启动接收中断
+        HAL_UART_Receive_IT(&huart1, &received_data, 1);
+    }
+}
+```
+
+### 使用示例
+
+```c
+int main(void) {
+    // 系统初始化
+    system_init();
+    uart_init(115200);  // 初始化串口，波特率115200
+    
+    printf("PID参数接收器已启动\n");
+    printf("等待接收PID参数...\n");
+    
+    while (1) {
+        // 主循环处理
+        process_serial_data();
+        
+        // 其他系统任务
+        // control_loop();  // 执行控制算法
+        
+        delay_ms(1);
+    }
+}
+```
+
+### 编译注意事项
+
+1. **字节对齐**：确保结构体按字节对齐，使用 `__attribute__((packed))`
+2. **端序问题**：IEEE754浮点数使用小端序，确保处理器字节序匹配
+3. **缓冲区管理**：合理设置接收缓冲区大小，防止溢出
+4. **实时性**：建议在中断中接收数据，主循环中解析数据包
+
+### 数据包格式说明
+
+```
++--------+--------+------+--------+--------+--------+----------+--------+--------+
+| 帧头1  | 帧头2  | 类型 |   P    |   I    |   D    |  校验和  | 帧尾1  | 帧尾2  |
++--------+--------+------+--------+--------+--------+----------+--------+--------+
+| 0xA5   | 0x5A   | 1字节| 4字节  | 4字节  | 4字节  |  1字节   | 0x5A   | 0xA5   |
++--------+--------+------+--------+--------+--------+----------+--------+--------+
+```
+
+- **帧头**: 0xA5 0x5A（固定值）
+- **类型**: 0x01=角速度环, 0x02=角度环, 0x03=速度环
+- **PID参数**: IEEE754单精度浮点数，小端序
+- **校验和**: (类型 + P的4字节 + I的4字节 + D的4字节) 的和 & 0xFF
+- **帧尾**: 0x5A 0xA5（固定值）
+
+这个C语言示例代码可以直接在单片机项目中使用，根据你的具体硬件平台调整串口初始化和数据接收部分即可。
 
 ## 技术支持
 

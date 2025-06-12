@@ -317,7 +317,7 @@ class PIDTuner:
         """精度调节"""
         current = var.get()
         new_value = current + delta
-        var.set(round(new_value, 6))
+        var.set(round(new_value, 5))
         
     def apply_range(self, param_key, pid_type, min_val, max_val):
         """应用单个参数范围"""
@@ -386,7 +386,7 @@ class PIDTuner:
                     for pid_type in ['P', 'I', 'D']:
                         value = params[pid_type]
                         range_info = ranges[pid_type]
-                        f.write(f"  {pid_type}: {value:.6f} (范围: {range_info['min']:.1f} - {range_info['max']:.1f})\n")
+                        f.write(f"  {pid_type}: {value:.5f} (范围: {range_info['min']:.1f} - {range_info['max']:.1f})\n")
                     f.write("\n")
                     
             self.log_status(f"参数报告已导出到: {filename}")
@@ -470,8 +470,8 @@ class PIDTuner:
         # 通信协议格式：
         # 帧头(2字节) + 类型(1字节) + P(4字节float) + I(4字节float) + D(4字节float) + 校验和(1字节) + 帧尾(2字节)
         
-        frame_header = b'\xAA\x55'  # 帧头
-        frame_tail = b'\x55\xAA'   # 帧尾
+        frame_header = b'\xA5\x5A'  # 帧头
+        frame_tail = b'\x5A\xA5'   # 帧尾
         
         # 参数类型映射
         type_map = {
