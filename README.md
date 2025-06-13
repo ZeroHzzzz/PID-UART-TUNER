@@ -263,7 +263,7 @@ uv add --dev package-name
 
 如果你需要在单片机或其他C语言环境中接收PID参数，可以参考以下示例代码：
 
-### 数据结构定义
+### 方法一：结构体方式（原方法）
 
 ```c
 #include <stdint.h>
@@ -272,12 +272,50 @@ uv add --dev package-name
 // PID参数数据包结构（17字节）
 typedef struct {
     uint8_t header;       // 帧头 0xA5
-    uint8_t command;      // 指令字：0x05=角速度环, 0x06=角度环, 0x07=速度环
+    uint8_t command;      // 指令字：0x01=角速度环, 0x02=角度环, 0x03=速度环
     float p;              // P参数（IEEE754单精度浮点数，小端序）
     float i;              // I参数
     float d;              // D参数  
     uint8_t checksum;     // 校验和
 } __attribute__((packed)) PIDPacket;
+```
+
+### 方法二：Union联合体方式（推荐）
+
+```c
+#include <stdint.h>
+#include <string.h>
+
+// 使用union进行数据包解析，更灵活和高效
+typedef union {
+    // 按字节访问整个数据包
+    uint8_t bytes[17];
+    
+    // 按结构化方式访问
+    struct {
+        uint8_t header;       // 帧头 0xA5
+        uint8_t command;      // 指令字
+        float p;              // P参数
+        float i;              // I参数
+        float d;              // D参数
+        uint8_t checksum;     // 校验和
+    } __attribute__((packed)) fields;
+    
+    // 按不同数据类型分组访问
+    struct {
+        uint8_t header_cmd[2];    // 帧头+指令字
+        float params[3];          // P、I、D参数数组
+        uint8_t checksum;         // 校验和
+    } __attribute__((packed)) groups;
+    
+} PIDPacketUnion;
+
+// 浮点数与字节转换的union
+typedef union {
+    float f;
+    uint8_t bytes[4];
+    uint32_t u32;
+} FloatUnion;
 
 // PID参数存储结构
 typedef struct {
@@ -290,35 +328,39 @@ PIDParams angle_pid = {0, 0, 0};             // 角度环
 PIDParams velocity_pid = {0, 0, 0};          // 速度环
 ```
 
-### 数据包解析函数
+### Union方式的数据包解析函数
 
 ```c
 /**
- * 解析PID参数数据包
+ * 使用Union解析PID参数数据包
  * @param buffer: 接收到的数据缓冲区
  * @param len: 数据长度
  * @return: 1=成功解析, 0=无有效数据包
  */
-int parse_pid_packet(uint8_t* buffer, int len) {
+int parse_pid_packet_union(uint8_t* buffer, int len) {
+    PIDPacketUnion packet;
+    
     // 查找完整的数据包（17字节）
     for (int i = 0; i <= len - 17; i++) {
         // 查找帧头 0xA5
         if (buffer[i] == 0xA5) {
-            PIDPacket* packet = (PIDPacket*)(buffer + i);
+            
+            // 将数据复制到union中
+            memcpy(packet.bytes, &buffer[i], 17);
             
             // 验证指令字有效性
-            if (packet->command >= 0x05 && packet->command <= 0x07) {
+            if (packet.fields.command >= 0x01 && packet.fields.command <= 0x03) {
                 
-                // 计算校验和（指令字 + P + I + D 的所有字节）
+                // 使用Union方式计算校验和
                 uint8_t calculated_checksum = 0;
                 for (int j = 1; j < 16; j++) {  // 从指令字到D参数结束
-                    calculated_checksum += buffer[i + j];
+                    calculated_checksum += packet.bytes[j];
                 }
                 
                 // 验证校验和
-                if (calculated_checksum == packet->checksum) {
-                    // 应用PID参数
-                    apply_pid_params(packet->command, packet->p, packet->i, packet->d);
+                if (calculated_checksum == packet.fields.checksum) {
+                    // 应用PID参数 - 直接使用union的结构化访问
+                    apply_pid_params_union(&packet);
                     return 1;  // 成功解析
                 }
             }
@@ -328,27 +370,32 @@ int parse_pid_packet(uint8_t* buffer, int len) {
 }
 
 /**
- * 应用接收到的PID参数
- * @param command: 指令字
- * @param p, i, d: PID参数值
+ * 应用接收到的PID参数（Union版本）
+ * @param packet: 数据包Union指针
  */
-void apply_pid_params(uint8_t command, float p, float i, float d) {
+void apply_pid_params_union(PIDPacketUnion* packet) {
+    // 可以用多种方式访问数据
+    uint8_t command = packet->fields.command;
+    float p = packet->fields.p;  // 或者 packet->groups.params[0]
+    float i = packet->fields.i;  // 或者 packet->groups.params[1]
+    float d = packet->fields.d;  // 或者 packet->groups.params[2]
+    
     switch (command) {
-        case 0x05:  // 角速度环
+        case 0x01:  // 角速度环
             angular_velocity_pid.p = p;
             angular_velocity_pid.i = i;
             angular_velocity_pid.d = d;
             printf("更新角速度环PID: P=%.5f, I=%.5f, D=%.5f\n", p, i, d);
             break;
             
-        case 0x06:  // 角度环
+        case 0x02:  // 角度环
             angle_pid.p = p;
             angle_pid.i = i;
             angle_pid.d = d;
             printf("更新角度环PID: P=%.5f, I=%.5f, D=%.5f\n", p, i, d);
             break;
             
-        case 0x07:  // 速度环
+        case 0x03:  // 速度环
             velocity_pid.p = p;
             velocity_pid.i = i;
             velocity_pid.d = d;
@@ -362,133 +409,262 @@ void apply_pid_params(uint8_t command, float p, float i, float d) {
 }
 ```
 
-### 串口接收处理示例
+### 高级Union用法：字节序转换
 
 ```c
-#define BUFFER_SIZE 256
-
-uint8_t rx_buffer[BUFFER_SIZE];
-int rx_index = 0;
-
 /**
- * 串口中断接收处理函数
- * @param data: 接收到的单个字节
+ * 处理字节序转换的增强版解析函数
+ * 适用于大端序处理器或需要字节序转换的场合
  */
-void uart_rx_handler(uint8_t data) {
-    // 将接收到的数据存入缓冲区
-    rx_buffer[rx_index] = data;
-    rx_index++;
+int parse_pid_packet_endian_safe(uint8_t* buffer, int len) {
+    PIDPacketUnion packet;
+    FloatUnion float_converter;
     
-    // 防止缓冲区溢出
-    if (rx_index >= BUFFER_SIZE) {
-        rx_index = 0;
-    }
-    
-    // 如果缓冲区有足够数据，尝试解析
-    if (rx_index >= 17) {
-        if (parse_pid_packet(rx_buffer, rx_index)) {
-            // 成功解析后，移动缓冲区数据
-            memmove(rx_buffer, rx_buffer + 17, rx_index - 17);
-            rx_index -= 17;
+    for (int i = 0; i <= len - 17; i++) {
+        if (buffer[i] == 0xA5) {
+            memcpy(packet.bytes, &buffer[i], 17);
+            
+            if (packet.fields.command >= 0x01 && packet.fields.command <= 0x03) {
+                
+                // 校验和计算
+                uint8_t calculated_checksum = 0;
+                for (int j = 1; j < 16; j++) {
+                    calculated_checksum += packet.bytes[j];
+                }
+                
+                if (calculated_checksum == packet.fields.checksum) {
+                    
+                    // 如果需要字节序转换（大端序系统）
+                    #ifdef BIG_ENDIAN_SYSTEM
+                    // 转换P参数
+                    for (int k = 0; k < 4; k++) {
+                        float_converter.bytes[k] = packet.bytes[2 + 3 - k];
+                    }
+                    float p = float_converter.f;
+                    
+                    // 转换I参数
+                    for (int k = 0; k < 4; k++) {
+                        float_converter.bytes[k] = packet.bytes[6 + 3 - k];
+                    }
+                    float i = float_converter.f;
+                    
+                    // 转换D参数
+                    for (int k = 0; k < 4; k++) {
+                        float_converter.bytes[k] = packet.bytes[10 + 3 - k];
+                    }
+                    float d = float_converter.f;
+                    #else
+                    // 小端序系统，直接使用
+                    float p = packet.fields.p;
+                    float i = packet.fields.i;
+                    float d = packet.fields.d;
+                    #endif
+                    
+                    // 应用参数
+                    apply_pid_params_direct(packet.fields.command, p, i, d);
+                    return 1;
+                }
+            }
         }
     }
+    return 0;
 }
 
 /**
- * 主循环中的处理函数（轮询方式）
+ * 直接参数应用函数
  */
-void process_serial_data(void) {
-    // 如果使用轮询方式接收串口数据
-    while (uart_data_available()) {
-        uint8_t data = uart_read_byte();
-        uart_rx_handler(data);
+void apply_pid_params_direct(uint8_t command, float p, float i, float d) {
+    switch (command) {
+        case 0x01:
+            angular_velocity_pid.p = p;
+            angular_velocity_pid.i = i;
+            angular_velocity_pid.d = d;
+            printf("更新角速度环PID: P=%.5f, I=%.5f, D=%.5f\n", p, i, d);
+            break;
+        case 0x02:
+            angle_pid.p = p;
+            angle_pid.i = i;
+            angle_pid.d = d;
+            printf("更新角度环PID: P=%.5f, I=%.5f, D=%.5f\n", p, i, d);
+            break;
+        case 0x03:
+            velocity_pid.p = p;
+            velocity_pid.i = i;
+            velocity_pid.d = d;
+            printf("更新速度环PID: P=%.5f, I=%.5f, D=%.5f\n", p, i, d);
+            break;
+        default:
+            printf("未知指令字: 0x%02X\n", command);
+            break;
     }
 }
 ```
 
-### STM32 HAL库示例
+### 流式解析器（状态机+Union）
 
 ```c
-// STM32 HAL库的串口接收中断处理
-void HAL_UART_RxCpltCallback(UART_HandleTypeDef *huart) {
-    if (huart == &huart1) {  // 假设使用UART1
-        uint8_t received_data;
-        
-        // 读取接收到的数据
-        HAL_UART_Receive(&huart1, &received_data, 1, HAL_MAX_DELAY);
-        
-        // 处理接收数据
-        uart_rx_handler(received_data);
-        
-        // 重新启动接收中断
-        HAL_UART_Receive_IT(&huart1, &received_data, 1);
+// 解析状态枚举
+typedef enum {
+    PARSE_STATE_WAIT_HEADER,
+    PARSE_STATE_WAIT_COMMAND,
+    PARSE_STATE_WAIT_DATA,
+    PARSE_STATE_WAIT_CHECKSUM,
+    PARSE_STATE_COMPLETE
+} ParseState;
+
+// 流式解析器结构
+typedef struct {
+    ParseState state;
+    PIDPacketUnion packet;
+    int byte_index;
+    uint8_t calculated_checksum;
+} StreamParser;
+
+// 初始化解析器
+void init_stream_parser(StreamParser* parser) {
+    parser->state = PARSE_STATE_WAIT_HEADER;
+    parser->byte_index = 0;
+    parser->calculated_checksum = 0;
+    memset(&parser->packet, 0, sizeof(PIDPacketUnion));
+}
+
+/**
+ * 流式解析单个字节
+ * @param parser: 解析器指针
+ * @param byte: 接收到的字节
+ * @return: 1=数据包完成, 0=需要更多数据, -1=错误
+ */
+int parse_stream_byte(StreamParser* parser, uint8_t byte) {
+    switch (parser->state) {
+        case PARSE_STATE_WAIT_HEADER:
+            if (byte == 0xA5) {
+                parser->packet.bytes[0] = byte;
+                parser->byte_index = 1;
+                parser->calculated_checksum = 0;
+                parser->state = PARSE_STATE_WAIT_COMMAND;
+            }
+            break;
+            
+        case PARSE_STATE_WAIT_COMMAND:
+            if (byte >= 0x01 && byte <= 0x03) {
+                parser->packet.bytes[1] = byte;
+                parser->calculated_checksum += byte;
+                parser->byte_index = 2;
+                parser->state = PARSE_STATE_WAIT_DATA;
+            } else {
+                parser->state = PARSE_STATE_WAIT_HEADER;
+                return -1;
+            }
+            break;
+            
+        case PARSE_STATE_WAIT_DATA:
+            parser->packet.bytes[parser->byte_index] = byte;
+            parser->calculated_checksum += byte;
+            parser->byte_index++;
+            
+            if (parser->byte_index == 16) {  // 收集完所有数据
+                parser->state = PARSE_STATE_WAIT_CHECKSUM;
+            }
+            break;
+            
+        case PARSE_STATE_WAIT_CHECKSUM:
+            parser->packet.bytes[16] = byte;
+            
+            if ((parser->calculated_checksum & 0xFF) == byte) {
+                parser->state = PARSE_STATE_COMPLETE;
+                return 1;  // 数据包完成
+            } else {
+                parser->state = PARSE_STATE_WAIT_HEADER;
+                return -1;  // 校验和错误
+            }
+            break;
+            
+        case PARSE_STATE_COMPLETE:
+            // 重置解析器
+            parser->state = PARSE_STATE_WAIT_HEADER;
+            break;
     }
+    
+    return 0;  // 需要更多数据
 }
 ```
 
 ### 使用示例
 
 ```c
+// 全局解析器
+StreamParser g_parser;
+
+/**
+ * 串口中断接收处理函数（使用流式解析器）
+ */
+void uart_rx_handler_stream(uint8_t data) {
+    int result = parse_stream_byte(&g_parser, data);
+    
+    if (result == 1) {
+        // 数据包解析完成
+        apply_pid_params_union(&g_parser.packet);
+        
+        // 打印调试信息
+        printf("收到数据包: ");
+        for (int i = 0; i < 17; i++) {
+            printf("%02X ", g_parser.packet.bytes[i]);
+        }
+        printf("\n");
+        
+    } else if (result == -1) {
+        // 解析错误
+        printf("数据包解析错误\n");
+    }
+    // result == 0 时继续等待更多数据
+}
+
+/**
+ * 主函数示例
+ */
 int main(void) {
     // 系统初始化
     system_init();
-    uart_init(115200);  // 初始化串口，波特率115200
+    uart_init(115200);
     
-    printf("PID参数接收器已启动\n");
-    printf("等待接收PID参数...\n");
+    // 初始化解析器
+    init_stream_parser(&g_parser);
+    
+    printf("PID参数接收器已启动（Union版本）\n");
+    printf("支持流式解析和多种数据访问方式\n");
     
     while (1) {
         // 主循环处理
-        process_serial_data();
+        // uart_rx_handler_stream() 会在中断中被调用
         
         // 其他系统任务
-        // control_loop();  // 执行控制算法
-        
         delay_ms(1);
     }
 }
 ```
 
-### 编译注意事项
+### Union方式的优势
 
-1. **字节对齐**：确保结构体按字节对齐，使用 `__attribute__((packed))`
-2. **端序问题**：IEEE754浮点数使用小端序，确保处理器字节序匹配
-3. **缓冲区管理**：合理设置接收缓冲区大小，防止溢出
-4. **实时性**：建议在中断中接收数据，主循环中解析数据包
+1. **灵活的数据访问**：
+   - `packet.bytes[i]` - 按字节访问
+   - `packet.fields.p` - 按结构化字段访问
+   - `packet.groups.params[0]` - 按分组访问
 
-### 数据包格式说明
+2. **内存效率**：
+   - 同一块内存的不同视图
+   - 零拷贝数据转换
+   - 减少内存占用
 
-```
-+--------+--------+--------+--------+--------+----------+
-| 帧头   | 指令字 |   P    |   I    |   D    |  校验和  |
-+--------+--------+--------+--------+--------+----------+
-| 0xA5   | 1字节  | 4字节  | 4字节  | 4字节  |  1字节   |
-+--------+--------+--------+--------+--------+----------+
-```
+3. **类型安全**：
+   - 编译时类型检查
+   - 避免指针转换错误
 
-- **帧头**: 0xA5（固定值）
-- **指令字**: 0x05=角速度环, 0x06=角度环, 0x07=速度环
-- **PID参数**: IEEE754单精度浮点数，小端序
-- **校验和**: (指令字 + P的4字节 + I的4字节 + D的4字节) 的和 & 0xFF
+4. **易于调试**：
+   - 可以同时查看原始字节和解析后的数据
+   - 方便打印和分析
 
-**数据包总长度**: 17字节
+5. **字节序处理**：
+   - 灵活处理不同字节序
+   - 支持跨平台移植
 
-**示例数据包**:
-```
-A5 01 00 00 20 41 CD CC CC 3D 0A D7 A3 3C 42
-│  │  └─────P参数─────┘ └─────I参数─────┘ └─────D参数─────┘ │
-│  └─指令字(角速度环)                                        └─校验和
-└─帧头
-```
-
-这个C语言示例代码可以直接在单片机项目中使用，根据你的具体硬件平台调整串口初始化和数据接收部分即可。
-
-## 技术支持
-
-如需技术支持，请提供：
-1. 错误现象描述
-2. 使用的参数值和范围设置
-3. 串口配置信息
-4. 状态信息区域的错误日志
-5. 导出的参数报告（如有）
-6. 使用的包管理器（UV或pip）和版本信息
+这种Union方式特别适合需要高效解析二进制协议的嵌入式系统！
