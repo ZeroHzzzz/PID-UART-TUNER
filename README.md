@@ -269,15 +269,14 @@ uv add --dev package-name
 #include <stdint.h>
 #include <string.h>
 
-// PID参数数据包结构（16字节）
+// PID参数数据包结构（17字节）
 typedef struct {
-    uint8_t header[2];    // 帧头 0xA5 0x5A
-    uint8_t type;         // 参数类型：0x01=角速度环, 0x02=角度环, 0x03=速度环
+    uint8_t header;       // 帧头 0xA5
+    uint8_t command;      // 指令字：0x05=角速度环, 0x06=角度环, 0x07=速度环
     float p;              // P参数（IEEE754单精度浮点数，小端序）
     float i;              // I参数
     float d;              // D参数  
     uint8_t checksum;     // 校验和
-    uint8_t tail[2];      // 帧尾 0x5A 0xA5
 } __attribute__((packed)) PIDPacket;
 
 // PID参数存储结构
@@ -301,25 +300,25 @@ PIDParams velocity_pid = {0, 0, 0};          // 速度环
  * @return: 1=成功解析, 0=无有效数据包
  */
 int parse_pid_packet(uint8_t* buffer, int len) {
-    // 查找完整的数据包（16字节）
-    for (int i = 0; i <= len - 16; i++) {
-        // 查找帧头 0xA5 0x5A
-        if (buffer[i] == 0xA5 && buffer[i+1] == 0x5A) {
+    // 查找完整的数据包（17字节）
+    for (int i = 0; i <= len - 17; i++) {
+        // 查找帧头 0xA5
+        if (buffer[i] == 0xA5) {
             PIDPacket* packet = (PIDPacket*)(buffer + i);
             
-            // 验证帧尾 0x5A 0xA5
-            if (packet->tail[0] == 0x5A && packet->tail[1] == 0xA5) {
+            // 验证指令字有效性
+            if (packet->command >= 0x05 && packet->command <= 0x07) {
                 
-                // 计算校验和
+                // 计算校验和（指令字 + P + I + D 的所有字节）
                 uint8_t calculated_checksum = 0;
-                for (int j = 2; j < 15; j++) {  // 从类型字节到D参数结束
+                for (int j = 1; j < 16; j++) {  // 从指令字到D参数结束
                     calculated_checksum += buffer[i + j];
                 }
                 
                 // 验证校验和
                 if (calculated_checksum == packet->checksum) {
                     // 应用PID参数
-                    apply_pid_params(packet->type, packet->p, packet->i, packet->d);
+                    apply_pid_params(packet->command, packet->p, packet->i, packet->d);
                     return 1;  // 成功解析
                 }
             }
@@ -330,26 +329,26 @@ int parse_pid_packet(uint8_t* buffer, int len) {
 
 /**
  * 应用接收到的PID参数
- * @param type: 参数类型
+ * @param command: 指令字
  * @param p, i, d: PID参数值
  */
-void apply_pid_params(uint8_t type, float p, float i, float d) {
-    switch (type) {
-        case 0x01:  // 角速度环
+void apply_pid_params(uint8_t command, float p, float i, float d) {
+    switch (command) {
+        case 0x05:  // 角速度环
             angular_velocity_pid.p = p;
             angular_velocity_pid.i = i;
             angular_velocity_pid.d = d;
             printf("更新角速度环PID: P=%.5f, I=%.5f, D=%.5f\n", p, i, d);
             break;
             
-        case 0x02:  // 角度环
+        case 0x06:  // 角度环
             angle_pid.p = p;
             angle_pid.i = i;
             angle_pid.d = d;
             printf("更新角度环PID: P=%.5f, I=%.5f, D=%.5f\n", p, i, d);
             break;
             
-        case 0x03:  // 速度环
+        case 0x07:  // 速度环
             velocity_pid.p = p;
             velocity_pid.i = i;
             velocity_pid.d = d;
@@ -357,7 +356,7 @@ void apply_pid_params(uint8_t type, float p, float i, float d) {
             break;
             
         default:
-            printf("未知参数类型: 0x%02X\n", type);
+            printf("未知指令字: 0x%02X\n", command);
             break;
     }
 }
@@ -386,11 +385,11 @@ void uart_rx_handler(uint8_t data) {
     }
     
     // 如果缓冲区有足够数据，尝试解析
-    if (rx_index >= 16) {
+    if (rx_index >= 17) {
         if (parse_pid_packet(rx_buffer, rx_index)) {
             // 成功解析后，移动缓冲区数据
-            memmove(rx_buffer, rx_buffer + 16, rx_index - 16);
-            rx_index -= 16;
+            memmove(rx_buffer, rx_buffer + 17, rx_index - 17);
+            rx_index -= 17;
         }
     }
 }
@@ -460,18 +459,27 @@ int main(void) {
 ### 数据包格式说明
 
 ```
-+--------+--------+------+--------+--------+--------+----------+--------+--------+
-| 帧头1  | 帧头2  | 类型 |   P    |   I    |   D    |  校验和  | 帧尾1  | 帧尾2  |
-+--------+--------+------+--------+--------+--------+----------+--------+--------+
-| 0xA5   | 0x5A   | 1字节| 4字节  | 4字节  | 4字节  |  1字节   | 0x5A   | 0xA5   |
-+--------+--------+------+--------+--------+--------+----------+--------+--------+
++--------+--------+--------+--------+--------+----------+
+| 帧头   | 指令字 |   P    |   I    |   D    |  校验和  |
++--------+--------+--------+--------+--------+----------+
+| 0xA5   | 1字节  | 4字节  | 4字节  | 4字节  |  1字节   |
++--------+--------+--------+--------+--------+----------+
 ```
 
-- **帧头**: 0xA5 0x5A（固定值）
-- **类型**: 0x01=角速度环, 0x02=角度环, 0x03=速度环
+- **帧头**: 0xA5（固定值）
+- **指令字**: 0x05=角速度环, 0x06=角度环, 0x07=速度环
 - **PID参数**: IEEE754单精度浮点数，小端序
-- **校验和**: (类型 + P的4字节 + I的4字节 + D的4字节) 的和 & 0xFF
-- **帧尾**: 0x5A 0xA5（固定值）
+- **校验和**: (指令字 + P的4字节 + I的4字节 + D的4字节) 的和 & 0xFF
+
+**数据包总长度**: 17字节
+
+**示例数据包**:
+```
+A5 01 00 00 20 41 CD CC CC 3D 0A D7 A3 3C 42
+│  │  └─────P参数─────┘ └─────I参数─────┘ └─────D参数─────┘ │
+│  └─指令字(角速度环)                                        └─校验和
+└─帧头
+```
 
 这个C语言示例代码可以直接在单片机项目中使用，根据你的具体硬件平台调整串口初始化和数据接收部分即可。
 

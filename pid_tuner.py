@@ -468,35 +468,40 @@ class PIDTuner:
     def send_data(self, param_type, p, i, d):
         """发送数据到串口"""
         # 通信协议格式：
-        # 帧头(2字节) + 类型(1字节) + P(4字节float) + I(4字节float) + D(4字节float) + 校验和(1字节) + 帧尾(2字节)
+        # 帧头(1字节:A5) + 指令字(1字节) + P(4字节float) + I(4字节float) + D(4字节float) + 校验和(1字节)
         
-        frame_header = b'\xA5\x5A'  # 帧头
-        frame_tail = b'\x5A\xA5'   # 帧尾
+        frame_header = b'\xA5'  # 帧头
         
-        # 参数类型映射
-        type_map = {
-            'angular_velocity': 0x01,  # 角速度环
-            'angle': 0x02,            # 角度环
-            'velocity': 0x03          # 速度环
+        # 指令字映射
+        command_map = {
+            'angular_velocity': 0x05,  # 角速度环
+            'angle': 0x06,            # 角度环
+            'velocity': 0x07          # 速度环
         }
         
-        param_type_byte = bytes([type_map[param_type]])
+        command_byte = bytes([command_map[param_type]])
         
         # 打包浮点数参数
         p_bytes = struct.pack('<f', p)
         i_bytes = struct.pack('<f', i)
         d_bytes = struct.pack('<f', d)
         
-        # 计算校验和
-        data_bytes = param_type_byte + p_bytes + i_bytes + d_bytes
+        # 组装数据部分
+        data_bytes = command_byte + p_bytes + i_bytes + d_bytes
+        
+        # 计算校验和（所有数据字节累加）
         checksum = sum(data_bytes) & 0xFF
         checksum_byte = bytes([checksum])
         
         # 组装完整数据包
-        packet = frame_header + data_bytes + checksum_byte + frame_tail
+        packet = frame_header + data_bytes + checksum_byte
         
         # 发送数据
         self.serial_port.write(packet)
+        
+        # 调试信息：显示发送的数据包
+        packet_hex = ' '.join(f'{b:02X}' for b in packet)
+        self.log_status(f"发送数据包: {packet_hex}")
         
     def save_config(self):
         """保存配置到文件"""
